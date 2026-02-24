@@ -129,9 +129,7 @@ df = fetch_and_clean_data()
 if not df.empty:
     # --- Filter Logic (Hardcoded 48 Hours) ---
     lookback_hours = 48
-    now_utc = pd.Timestamp.now(tz='UTC')
-    cutoff_time = now_utc - pd.Timedelta(hours=lookback_hours)
-    
+    cutoff_time = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=lookback_hours)
     filtered_df = df[df['time'] >= cutoff_time]
 
     # --- Live Maps (Latest Point Only) ---
@@ -143,13 +141,17 @@ if not df.empty:
 
     with col1:
         if t_grid is not None:
-            st.plotly_chart(create_map(t_grid, f"Current Temp (Peak: {t_max}°C)", "Hot", t_min, t_max),
+            st.plotly_chart(create_map(t_grid, f"Current Temp (Peak: {t_max:.1f}°C)", "Hot", t_min, t_max),
                             use_container_width=True)
+        else:
+            st.metric("Avg Temp", f"{latest_row.get('avg_temp', 0):.1f} °C")
 
     with col2:
         if h_grid is not None:
-            st.plotly_chart(create_map(h_grid, f"Current Humidity (Peak: {h_max}%)", "Teal", h_min, h_max),
+            st.plotly_chart(create_map(h_grid, f"Current Humidity (Peak: {h_max:.1f}%)", "Teal", h_min, h_max),
                             use_container_width=True)
+        else:
+            st.metric("Avg Humidity", f"{latest_row.get('avg_hum', 0):.1f} %")
 
     # --- Historical Trend ---
     st.markdown("---")
@@ -162,13 +164,9 @@ if not df.empty:
         trend_fig.add_trace(go.Scatter(x=filtered_df["time"], y=filtered_df["avg_hum"], name="Humidity (%)",
                                        line=dict(color="#00D4FF", width=2), yaxis="y2"))
 
-        # FORCE X-AXIS TO SHOW FULL 48 HOURS REGARDLESS OF DATA
+        # NOTE: Removed fixed range so the graph auto-zooms on available data
         trend_fig.update_layout(
             template="plotly_dark", hovermode="x unified", height=400,
-            xaxis=dict(
-                range=[cutoff_time, now_utc],
-                showgrid=False
-            ),
             yaxis=dict(
                 title=dict(text="Temperature (°C)", font=dict(color="#FF4B4B")),
                 tickfont=dict(color="#FF4B4B")
@@ -183,7 +181,7 @@ if not df.empty:
 
         st.plotly_chart(trend_fig, use_container_width=True)
     else:
-        st.warning(f"No data found in the last {lookback_hours} hours.")
+        st.warning(f"No data found in the last {lookback_hours} hours. (Did you reset the data?)")
 
     # --- Admin Controls ---
     with st.expander("⚙️ Admin Controls"):
