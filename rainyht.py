@@ -35,7 +35,7 @@ st.set_page_config(page_title="Rainford's Queendom", layout="wide")
 @st.cache_data(ttl=60)
 def fetch_and_clean_data():
     try:
-        # TIMEOUT INCREASED TO 60 SECONDS
+        # TIMEOUT 60 SECONDS
         r = requests.get(GOOGLE_SCRIPT_URL, timeout=60)
         r.raise_for_status()
         raw_history = r.json().get("history", [])
@@ -46,7 +46,7 @@ def fetch_and_clean_data():
         # Convert to DataFrame
         df = pd.DataFrame(raw_history)
 
-        # FIX: Force UTC-aware datetime conversion
+        # Force UTC-aware datetime conversion
         df['time'] = pd.to_datetime(df['time'], utc=True)
 
         # Helper to extract averages from the sensor list column
@@ -61,10 +61,10 @@ def fetch_and_clean_data():
         return df
 
     except ReadTimeout:
-        st.sidebar.error("⚠️ Timeout: Google Sheet took too long to respond. Try deleting old rows in the sheet.")
+        st.error("⚠️ Timeout: Google Sheet took too long to respond. Try deleting old rows in the sheet.")
         return pd.DataFrame()
     except Exception as e:
-        st.sidebar.error(f"Error fetching data: {e}")
+        st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
 
 
@@ -127,11 +127,8 @@ st.title("🐢 rainford's queendom environmental monitor")
 df = fetch_and_clean_data()
 
 if not df.empty:
-    # --- Sidebar Filtering ---
-    st.sidebar.header("Data Controls")
-    lookback_days = st.sidebar.slider("Days of history to load", 1, 30, 2)
-
-    # Filter with UTC-aware times
+    # --- Filter Logic (Hardcoded 48 Hours) ---
+    lookback_days = 2
     cutoff_time = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
     filtered_df = df[df['time'] >= cutoff_time]
 
@@ -163,7 +160,6 @@ if not df.empty:
         trend_fig.add_trace(go.Scatter(x=filtered_df["time"], y=filtered_df["avg_hum"], name="Humidity (%)",
                                        line=dict(color="#00D4FF", width=2), yaxis="y2"))
 
-        # FIX: Corrected the 'titlefont' error by nesting title settings
         trend_fig.update_layout(
             template="plotly_dark", hovermode="x unified", height=400,
             yaxis=dict(
@@ -182,9 +178,11 @@ if not df.empty:
     else:
         st.warning(f"No data found in the last {lookback_days} days.")
 
-    if st.sidebar.button("🗑️ Reset Data"):
-        requests.get(f"{GOOGLE_SCRIPT_URL}?action=clear")
-        st.cache_data.clear()
-        st.rerun()
+    # --- Admin Controls (Hidden in Expander) ---
+    with st.expander("⚙️ Admin Controls"):
+        if st.button("🗑️ Reset Data", type="primary"):
+            requests.get(f"{GOOGLE_SCRIPT_URL}?action=clear")
+            st.cache_data.clear()
+            st.rerun()
 else:
-    st.info("Awaiting live data stream... Check the sidebar for connection errors.")
+    st.info("Awaiting live data stream...")
