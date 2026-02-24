@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
 from matplotlib.path import Path
+from requests.exceptions import ReadTimeout
 
 # ==========================================
 # --- CONFIGURATION ---
@@ -31,13 +32,40 @@ st.set_page_config(page_title="Rainford's Queendom", layout="wide")
 # --- DATA PROCESSING ---
 # ==========================================
 
-@st.cache_data(ttl=5)
-def fetch_data():
+@st.cache_data(ttl=60)
+def fetch_and_clean_data():
     try:
-        r = requests.get(GOOGLE_SCRIPT_URL, timeout=10)
-        return r.json().get("history", [])
-    except:
-        return []
+        # TIMEOUT INCREASED TO 60 SECONDS
+        r = requests.get(GOOGLE_SCRIPT_URL, timeout=60)
+        r.raise_for_status()
+        raw_history = r.json().get("history", [])
+
+        if not raw_history:
+            return pd.DataFrame()
+
+        # Convert to DataFrame
+        df = pd.DataFrame(raw_history)
+
+        # FIX: Force UTC-aware datetime conversion
+        df['time'] = pd.to_datetime(df['time'], utc=True)
+
+        # Helper to extract averages from the sensor list column
+        def calculate_avg(sensor_list, key):
+            if not isinstance(sensor_list, list): return np.nan
+            vals = [s.get(key) for s in sensor_list if s.get(key) is not None]
+            return np.mean(vals) if vals else np.nan
+
+        df['avg_temp'] = df['sensors'].apply(lambda x: calculate_avg(x, 'temp'))
+        df['avg_hum'] = df['sensors'].apply(lambda x: calculate_avg(x, 'hum'))
+
+        return df
+
+    except ReadTimeout:
+        st.sidebar.error("⚠️ Timeout: Google Sheet took too long to respond. Try deleting old rows in the sheet.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.sidebar.error(f"Error fetching data: {e}")
+        return pd.DataFrame()
 
 
 def generate_clipped_surface(sensors, val_key):
@@ -45,30 +73,28 @@ def generate_clipped_surface(sensors, val_key):
     for i, s in enumerate(sensors):
         val = s.get(val_key)
         if i in SENSOR_MAP and val is not None:
-            x.append(SENSOR_MAP[i][0]);
-            y.append(SENSOR_MAP[i][1]);
+            x.append(SENSOR_MAP[i][0])
+            y.append(SENSOR_MAP[i][1])
             z.append(float(val))
 
     if len(z) < 3: return None, None, None, 0, 0
 
-    local_max = max(z)
-    local_min = min(z)
-
-    # 1. Create large grid for interpolation
+    local_max, local_min = max(z), min(z)
     avg = np.mean(z)
-    for px, py in [(-0.3, 1.5), (1.5, 1.5), (-0.3, 3.5), (1.5, 3.5)]:
-        x.append(px);
-        y.append(py);
-        z.append(avg)
 
-    grid_x, grid_y = np.meshgrid(np.linspace(-0.1, 1.3, 200), np.linspace(1.7, 3.3, 200))
-    grid_z = griddata((x, y), z, (grid_x, grid_y), method='cubic')
+    # Padding points to help interpolation reach edges
+    x_ext = x + [-0.3, 1.5, -0.3, 1.5]
+    y_ext = y + [1.5, 1.5, 3.5, 3.5]
+    z_ext = z + [avg, avg, avg, avg]
 
-    # 2. Apply Clipping Mask
+    # Coarser grid (100x100) for speed
+    grid_x, grid_y = np.meshgrid(np.linspace(-0.1, 1.3, 100), np.linspace(1.7, 3.3, 100))
+    grid_z = griddata((x_ext, y_ext), z_ext, (grid_x, grid_y), method='cubic')
+
+    # Clipping to Octagon
     poly_path = Path(OCTAGON_POLY)
     points = np.vstack((grid_x.flatten(), grid_y.flatten())).T
-    mask = poly_path.contains_points(points)
-    mask = mask.reshape(grid_x.shape)
+    mask = poly_path.contains_points(points).reshape(grid_x.shape)
     grid_z[~mask] = np.nan
 
     return grid_x, grid_y, grid_z, local_max, local_min
@@ -76,15 +102,13 @@ def generate_clipped_surface(sensors, val_key):
 
 def create_map(grid_z, title, colorscale, zmin, zmax):
     fig = go.Figure(data=go.Contour(
-        z=grid_z, x=np.linspace(-0.1, 1.3, 200), y=np.linspace(1.7, 3.3, 200),
+        z=grid_z, x=np.linspace(-0.1, 1.3, 100), y=np.linspace(1.7, 3.3, 100),
         colorscale=colorscale, zmin=zmin, zmax=zmax, showscale=True,
         contours=dict(coloring='heatmap', showlabels=False),
-        line=dict(width=0),
-        connectgaps=False,
+        line=dict(width=0), connectgaps=False,
         colorbar=dict(thickness=15)
     ))
 
-    # White Outline
     path_str = "M 0.4 1.8 L 0.0 2.2 L 0.0 2.8 L 0.4 3.2 L 0.8 3.2 L 1.2 2.8 L 1.2 2.2 L 0.8 1.8 Z"
     fig.add_shape(type="path", path=path_str, line=dict(color="white", width=3))
 
@@ -98,16 +122,25 @@ def create_map(grid_z, title, colorscale, zmin, zmax):
 # ==========================================
 # --- UI ---
 # ==========================================
-# The Tortoise has returned!
 st.title("🐢 rainford's queendom environmental monitor")
-history = fetch_data()
 
-if history:
-    latest = history[-1]
+df = fetch_and_clean_data()
+
+if not df.empty:
+    # --- Sidebar Filtering ---
+    st.sidebar.header("Data Controls")
+    lookback_days = st.sidebar.slider("Days of history to load", 1, 30, 2)
+
+    # Filter with UTC-aware times
+    cutoff_time = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
+    filtered_df = df[df['time'] >= cutoff_time]
+
+    # --- Live Maps (Latest Point Only) ---
+    latest_row = df.iloc[-1]
     col1, col2 = st.columns(2)
 
-    tgx, tgy, t_grid, t_max, t_min = generate_clipped_surface(latest["sensors"], "temp")
-    hgx, hgy, h_grid, h_max, h_min = generate_clipped_surface(latest["sensors"], "hum")
+    tgx, tgy, t_grid, t_max, t_min = generate_clipped_surface(latest_row["sensors"], "temp")
+    hgx, hgy, h_grid, h_max, h_min = generate_clipped_surface(latest_row["sensors"], "hum")
 
     with col1:
         if t_grid is not None:
@@ -121,49 +154,37 @@ if history:
 
     # --- Historical Trend ---
     st.markdown("---")
-    st.subheader("📈 Environmental Trends")
+    st.subheader(f"📈 Environmental Trends (Last {lookback_days} Days)")
 
-    df_list = []
-    for entry in history:
-        s_list = entry.get('sensors', [])
-        t_vals = [s.get('temp') for s in s_list if s.get('temp') is not None]
-        h_vals = [s.get('hum') for s in s_list if s.get('hum') is not None]
+    if not filtered_df.empty:
+        trend_fig = go.Figure()
+        trend_fig.add_trace(go.Scatter(x=filtered_df["time"], y=filtered_df["avg_temp"], name="Temp (°C)",
+                                       line=dict(color="#FF4B4B", width=2), yaxis="y1"))
+        trend_fig.add_trace(go.Scatter(x=filtered_df["time"], y=filtered_df["avg_hum"], name="Humidity (%)",
+                                       line=dict(color="#00D4FF", width=2), yaxis="y2"))
 
-        df_list.append({
-            "Time": entry.get('time', 'Unknown'),
-            "Avg Temp": np.mean(t_vals) if t_vals else None,
-            "Avg Hum": np.mean(h_vals) if h_vals else None
-        })
+        # FIX: Corrected the 'titlefont' error by nesting title settings
+        trend_fig.update_layout(
+            template="plotly_dark", hovermode="x unified", height=400,
+            yaxis=dict(
+                title=dict(text="Temperature (°C)", font=dict(color="#FF4B4B")),
+                tickfont=dict(color="#FF4B4B")
+            ),
+            yaxis2=dict(
+                title=dict(text="Humidity (%)", font=dict(color="#00D4FF")),
+                tickfont=dict(color="#00D4FF"),
+                overlaying="y", side="right"
+            ),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
 
-    df = pd.DataFrame(df_list)
-
-    trend_fig = go.Figure()
-    trend_fig.add_trace(go.Scatter(x=df["Time"], y=df["Avg Temp"], name="Temp (°C)",
-                                   line=dict(color="#FF4B4B", width=3), yaxis="y1"))
-    trend_fig.add_trace(go.Scatter(x=df["Time"], y=df["Avg Hum"], name="Humidity (%)",
-                                   line=dict(color="#00D4FF", width=3), yaxis="y2"))
-
-    trend_fig.update_layout(
-        template="plotly_dark",
-        hovermode="x unified",
-        height=400,
-        margin=dict(l=50, r=50, t=20, b=20),
-        yaxis=dict(
-            title=dict(text="Temperature (°C)", font=dict(color="#FF4B4B")),
-            tickfont=dict(color="#FF4B4B")
-        ),
-        yaxis2=dict(
-            title=dict(text="Humidity (%)", font=dict(color="#00D4FF")),
-            tickfont=dict(color="#00D4FF"),
-            overlaying="y", side="right"
-        ),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-
-    st.plotly_chart(trend_fig, use_container_width=True)
+        st.plotly_chart(trend_fig, use_container_width=True)
+    else:
+        st.warning(f"No data found in the last {lookback_days} days.")
 
     if st.sidebar.button("🗑️ Reset Data"):
         requests.get(f"{GOOGLE_SCRIPT_URL}?action=clear")
+        st.cache_data.clear()
         st.rerun()
 else:
-    st.info("Awaiting live data stream...")
+    st.info("Awaiting live data stream... Check the sidebar for connection errors.")
