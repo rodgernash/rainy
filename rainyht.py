@@ -128,8 +128,10 @@ df = fetch_and_clean_data()
 
 if not df.empty:
     # --- Filter Logic (Hardcoded 48 Hours) ---
-    lookback_days = 2
-    cutoff_time = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
+    lookback_hours = 48
+    now_utc = pd.Timestamp.now(tz='UTC')
+    cutoff_time = now_utc - pd.Timedelta(hours=lookback_hours)
+    
     filtered_df = df[df['time'] >= cutoff_time]
 
     # --- Live Maps (Latest Point Only) ---
@@ -151,7 +153,7 @@ if not df.empty:
 
     # --- Historical Trend ---
     st.markdown("---")
-    st.subheader(f"📈 Environmental Trends (Last {lookback_days} Days)")
+    st.subheader(f"📈 Environmental Trends (Last {lookback_hours} Hours)")
 
     if not filtered_df.empty:
         trend_fig = go.Figure()
@@ -160,8 +162,13 @@ if not df.empty:
         trend_fig.add_trace(go.Scatter(x=filtered_df["time"], y=filtered_df["avg_hum"], name="Humidity (%)",
                                        line=dict(color="#00D4FF", width=2), yaxis="y2"))
 
+        # FORCE X-AXIS TO SHOW FULL 48 HOURS REGARDLESS OF DATA
         trend_fig.update_layout(
             template="plotly_dark", hovermode="x unified", height=400,
+            xaxis=dict(
+                range=[cutoff_time, now_utc],
+                showgrid=False
+            ),
             yaxis=dict(
                 title=dict(text="Temperature (°C)", font=dict(color="#FF4B4B")),
                 tickfont=dict(color="#FF4B4B")
@@ -176,9 +183,9 @@ if not df.empty:
 
         st.plotly_chart(trend_fig, use_container_width=True)
     else:
-        st.warning(f"No data found in the last {lookback_days} days.")
+        st.warning(f"No data found in the last {lookback_hours} hours.")
 
-    # --- Admin Controls (Hidden in Expander) ---
+    # --- Admin Controls ---
     with st.expander("⚙️ Admin Controls"):
         if st.button("🗑️ Reset Data", type="primary"):
             requests.get(f"{GOOGLE_SCRIPT_URL}?action=clear")
